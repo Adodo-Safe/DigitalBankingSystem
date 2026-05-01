@@ -1,6 +1,12 @@
+import axios from "axios";
+import dotenv from "dotenv";
 import Account from "../models/account.model.js";
 import Transaction from "../models/transaction.model.js";
 import { createAccount as createAccountService } from "../services/account.service.js";
+
+dotenv.config();
+
+const PHOENIX_TOKEN = process.env.PHOENIX_TOKEN?.trim();
 
 /*
     CREATE ACCOUNT
@@ -101,7 +107,6 @@ export const transferFunds = async (req, res) => {
 
         const { from, to, amount } = req.body;
 
-        // validations
         if (!from || !to || !amount) {
             return res.status(400).json({
                 message: "from, to, and amount are required"
@@ -117,9 +122,9 @@ export const transferFunds = async (req, res) => {
         const sender = await Account.findOne({ accountNumber: from });
         const receiver = await Account.findOne({ accountNumber: to });
 
-        if (!sender || !receiver) {
+        if (!sender) {
             return res.status(404).json({
-                message: "Invalid account details"
+                message: "Sender account not found"
             });
         }
 
@@ -131,14 +136,67 @@ export const transferFunds = async (req, res) => {
             });
         }
 
-        // debit & credit
+        // INTERBANK TRANSFER (NIBSS / PHOENIX)
+
+        if (!receiver) {
+            sender.balance -= amt;
+            await sender.save();
+
+            try {
+                const response = await axios.post(
+                    "https://nibssbyphoenix.onrender.com/api/transfer",
+                    {
+                        accountNumber: to,
+                        amount: amt,
+                        bankCode: fintech.bankCode
+                    },
+                    {
+                        headers: {
+                            Authorization: `Bearer ${PHOENIX_TOKEN}`,
+                            "Content-Type": "application/json"
+                        }
+                    }
+                );
+
+                const transactionId = "TX" + Date.now();
+
+                await Transaction.create({
+                    transactionId,
+                    from,
+                    to,
+                    amount: amt,
+                    status: response.data?.status || "SUCCESS",
+                    type: "INTERBANK",
+                    bankCode: fintech.bankCode,
+                    bankName: fintech.bankName
+                });
+
+                return res.status(200).json({
+                    message: "Interbank transfer successful",
+                    transactionId,
+                    externalResponse: response.data
+                });
+            } catch (error) {
+                console.error(
+                    "PHOENIX ERROR:",
+                    error.response?.data || error.message
+                );
+
+                return res.status(500).json({
+                    message: "External transfer failed",
+                    error: error.response?.data || error.message
+                });
+            }
+        }
+
+        // INTERNAL TRANSFER
+
         sender.balance -= amt;
         receiver.balance += amt;
 
         await sender.save();
         await receiver.save();
 
-        // create transaction
         const transactionId = "TX" + Date.now();
 
         await Transaction.create({
@@ -147,6 +205,7 @@ export const transferFunds = async (req, res) => {
             to,
             amount: amt,
             status: "SUCCESS",
+            type: "INTERNAL",
             bankCode: fintech.bankCode,
             bankName: fintech.bankName
         });
@@ -157,7 +216,8 @@ export const transferFunds = async (req, res) => {
             from,
             to,
             amount: amt,
-            status: "SUCCESS"
+            status: "SUCCESS",
+            type: "INTERNAL"
         });
     } catch (error) {
         console.error("TRANSFER ERROR:", error);
@@ -169,7 +229,7 @@ export const transferFunds = async (req, res) => {
 };
 
 /*
-    TRANSACTION STATUS (TSQ)
+    TRANSACTION STATUS
 */
 export const getTransaction = async (req, res) => {
     try {
@@ -201,22 +261,26 @@ export const getTransaction = async (req, res) => {
     }
 };
 
+/*
+    TRANSACTION HISTORY
+*/
 export const getTransactionHistory = async (req, res) => {
     try {
         const { accountNumber } = req.params;
         const fintech = req.fintech;
 
-        // Ensure user is authenticated
         if (!fintech) {
-            return res.status(401).json({ message: "Unauthorized" });
+            return res.status(401).json({
+                message: "Unauthorized"
+            });
         }
 
-        
-        // Ensure account belongs to same bank
         const account = await Account.findOne({ accountNumber });
 
         if (!account) {
-            return res.status(404).json({ message: "Account not found" });
+            return res.status(404).json({
+                message: "Account not found"
+            });
         }
 
         if (account.bankCode !== fintech.bankCode) {
@@ -225,19 +289,14 @@ export const getTransactionHistory = async (req, res) => {
             });
         }
 
-        // Get transactions (both sent & received)
         const transactions = await Transaction.find({
-            $or: [
-                { from: accountNumber },
-                { to: accountNumber }
-            ]
+            $or: [{ from: accountNumber }, { to: accountNumber }]
         }).sort({ createdAt: -1 });
 
         return res.status(200).json({
             accountNumber,
             transactions
         });
-
     } catch (error) {
         return res.status(500).json({
             message: error.message
