@@ -7,6 +7,6 @@ const router = express.Router();
     FINTECH LOGIN → JWT TOKEN
 */
 
-router.post("/auth/token", loginFintech);
+router.post("/login", loginFintech);
 
 export default router;
